@@ -103,6 +103,69 @@ impl fmt::Display for RefreshTokenInvalidError {
 
 impl std::error::Error for RefreshTokenInvalidError {}
 
+/// AWS IdC 刷新请求打到了错误 Region，服务端会返回正确的 region/endpoint 提示
+#[derive(Debug)]
+struct IdcInvalidRequestRegionError {
+    pub region: String,
+    pub endpoint: String,
+    pub message: String,
+}
+
+impl fmt::Display for IdcInvalidRequestRegionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for IdcInvalidRequestRegionError {}
+
+#[derive(Debug, Deserialize)]
+struct IdcInvalidRequestRegionPayload {
+    #[serde(default, alias = "__type")]
+    error_type: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
+    region: Option<String>,
+    #[serde(default)]
+    endpoint: Option<String>,
+    #[serde(default, alias = "tokenEndpoint")]
+    token_endpoint: Option<String>,
+}
+
+fn infer_idc_region_from_endpoint(endpoint: &str) -> Option<String> {
+    endpoint
+        .strip_prefix("https://oidc.")
+        .and_then(|rest| rest.strip_suffix(".amazonaws.com/token"))
+        .filter(|region| !region.is_empty())
+        .map(ToString::to_string)
+}
+
+fn parse_idc_invalid_request_region(body_text: &str) -> Option<IdcInvalidRequestRegionError> {
+    let payload: IdcInvalidRequestRegionPayload = serde_json::from_str(body_text).ok()?;
+    let error_type = payload.error_type.as_deref().unwrap_or_default();
+    let message = payload.message.unwrap_or_else(|| body_text.to_string());
+
+    let is_region_error = error_type.contains("InvalidRequestRegionException")
+        || message.contains("InvalidRequestRegionException");
+    if !is_region_error {
+        return None;
+    }
+
+    let endpoint = payload.endpoint.or(payload.token_endpoint);
+    let region = payload
+        .region
+        .or_else(|| endpoint.as_deref().and_then(infer_idc_region_from_endpoint))?;
+    let endpoint =
+        endpoint.unwrap_or_else(|| format!("https://oidc.{}.amazonaws.com/token", region));
+
+    Some(IdcInvalidRequestRegionError {
+        region,
+        endpoint,
+        message,
+    })
+}
+
 /// 刷新 Token
 pub(crate) async fn refresh_token(
     credentials: &KiroCredentials,
@@ -242,6 +305,70 @@ async fn refresh_idc_token(
     // 优先级：凭据.auth_region > 凭据.region > config.auth_region > config.region
     let region = credentials.effective_auth_region(config);
     let refresh_url = format!("https://oidc.{}.amazonaws.com/token", region);
+    let mut new_credentials = match refresh_idc_token_once(
+        credentials,
+        config,
+        proxy,
+        client_id,
+        client_secret,
+        refresh_token,
+        &refresh_url,
+        region,
+    )
+    .await
+    {
+        Ok(data) => data,
+        Err(err) => {
+            let region_hint = err
+                .downcast_ref::<IdcInvalidRequestRegionError>()
+                .map(|hint| (hint.region.clone(), hint.endpoint.clone()));
+
+            if let Some((retry_region, retry_endpoint)) = region_hint {
+                if retry_region != region || retry_endpoint != refresh_url {
+                    tracing::warn!(
+                        "IdC refresh 命中了错误 Region，自动切换到 AWS 指定的 region={} endpoint={}",
+                        retry_region,
+                        retry_endpoint
+                    );
+                    let mut retried = refresh_idc_token_once(
+                        credentials,
+                        config,
+                        proxy,
+                        client_id,
+                        client_secret,
+                        refresh_token,
+                        &retry_endpoint,
+                        &retry_region,
+                    )
+                    .await?;
+                    retried.auth_region = Some(retry_region);
+                    retried
+                } else {
+                    return Err(err);
+                }
+            } else {
+                return Err(err);
+            }
+        }
+    };
+
+    if new_credentials.auth_region.is_none() && credentials.auth_region.is_some() {
+        new_credentials.auth_region = credentials.auth_region.clone();
+    }
+
+    Ok(new_credentials)
+}
+
+async fn refresh_idc_token_once(
+    credentials: &KiroCredentials,
+    config: &Config,
+    proxy: Option<&ProxyConfig>,
+    client_id: &str,
+    client_secret: &str,
+    refresh_token: &str,
+    refresh_url: &str,
+    region: &str,
+) -> anyhow::Result<KiroCredentials> {
     let os_name = &config.system_version;
     let node_version = &config.node_version;
 
@@ -260,7 +387,7 @@ async fn refresh_idc_token(
     };
 
     let response = client
-        .post(&refresh_url)
+        .post(refresh_url)
         .header("content-type", "application/json")
         .header("x-amz-user-agent", x_amz_user_agent)
         .header("user-agent", &user_agent)
@@ -285,6 +412,10 @@ async fn refresh_idc_token(
                 message: format!("IdC refreshToken 已失效 (invalid_grant): {}", body_text),
             }
             .into());
+        }
+
+        if let Some(err) = parse_idc_invalid_request_region(&body_text) {
+            return Err(err.into());
         }
 
         let error_msg = match status.as_u16() {
@@ -2002,6 +2133,46 @@ mod tests {
             result,
             "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
         );
+    }
+
+    #[test]
+    fn test_parse_idc_invalid_request_region_with_explicit_region_and_endpoint() {
+        let body = r#"{
+            "__type": "InvalidRequestRegionException",
+            "message": "Wrong region",
+            "region": "eu-west-1",
+            "endpoint": "https://oidc.eu-west-1.amazonaws.com/token"
+        }"#;
+
+        let parsed = parse_idc_invalid_request_region(body).expect("应解析出 region hint");
+        assert_eq!(parsed.region, "eu-west-1");
+        assert_eq!(parsed.endpoint, "https://oidc.eu-west-1.amazonaws.com/token");
+    }
+
+    #[test]
+    fn test_parse_idc_invalid_request_region_infers_region_from_endpoint() {
+        let body = r#"{
+            "__type": "com.amazonaws.ssooidc#InvalidRequestRegionException",
+            "message": "Wrong region",
+            "endpoint": "https://oidc.ap-southeast-1.amazonaws.com/token"
+        }"#;
+
+        let parsed = parse_idc_invalid_request_region(body).expect("应从 endpoint 反推出 region");
+        assert_eq!(parsed.region, "ap-southeast-1");
+        assert_eq!(
+            parsed.endpoint,
+            "https://oidc.ap-southeast-1.amazonaws.com/token"
+        );
+    }
+
+    #[test]
+    fn test_parse_idc_invalid_request_region_ignores_other_errors() {
+        let body = r#"{
+            "__type": "InvalidGrantException",
+            "message": "Invalid refresh token provided"
+        }"#;
+
+        assert!(parse_idc_invalid_request_region(body).is_none());
     }
 
     #[tokio::test]
