@@ -23,6 +23,7 @@ use parking_lot::Mutex;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use super::converter::get_context_window_size;
 use super::types::MessagesRequest;
 
 /// 默认缓存 TTL（Anthropic ephemeral 缓存为 5 分钟）
@@ -64,10 +65,20 @@ pub struct PromptCacheProfile {
 }
 
 impl PromptCacheProfile {
-    /// 用外部估算的输入 token 数抬高总量（不低于断点累计值）
+    /// 用外部估算的输入 token 数抬高总量（不低于断点累计值），但不超过模型上下文窗口。
     pub fn raise_total_input_tokens(&mut self, estimated: i32) {
-        if estimated > self.total_input_tokens {
-            self.total_input_tokens = estimated;
+        let capped = estimated.max(0).min(context_window_for_model(&self.model));
+        if capped > self.total_input_tokens {
+            self.total_input_tokens = capped;
+        }
+        self.cap_to_context_window();
+    }
+
+    fn cap_to_context_window(&mut self) {
+        let cap = context_window_for_model(&self.model);
+        self.total_input_tokens = self.total_input_tokens.min(cap);
+        for breakpoint in &mut self.breakpoints {
+            breakpoint.cumulative_tokens = breakpoint.cumulative_tokens.min(cap);
         }
     }
 }
@@ -96,6 +107,14 @@ fn min_cacheable_tokens_for_model(model: &str) -> i32 {
     } else {
         DEFAULT_MIN_CACHEABLE_TOKENS
     }
+}
+
+fn context_window_for_model(model: &str) -> i32 {
+    get_context_window_size(model).max(DEFAULT_MIN_CACHEABLE_TOKENS)
+}
+
+fn max_reportable_cache_tokens(total_input_tokens: i32) -> i32 {
+    ((total_input_tokens.max(0) as f64) * MAX_CACHEABLE_RATIO) as i32
 }
 
 impl PromptCacheTracker {
@@ -151,11 +170,13 @@ impl PromptCacheTracker {
             return None;
         }
 
-        Some(PromptCacheProfile {
+        let mut profile = PromptCacheProfile {
             breakpoints,
             total_input_tokens: cumulative_tokens,
             model: req.model.clone(),
-        })
+        };
+        profile.cap_to_context_window();
+        Some(profile)
     }
 
     /// 计算本次请求的模拟缓存使用量（在请求发出后、依据所选凭据调用）
@@ -182,6 +203,10 @@ impl PromptCacheTracker {
         let mut last_tokens = last_qualifying
             .cumulative_tokens
             .min(profile.total_input_tokens);
+        let max_cacheable = max_reportable_cache_tokens(profile.total_input_tokens);
+        if last_tokens > max_cacheable {
+            last_tokens = max_cacheable;
+        }
         let now = Instant::now();
 
         let mut accounts = self.entries_by_account.lock();
@@ -201,12 +226,6 @@ impl PromptCacheTracker {
                 };
             }
         };
-
-        // 命中上限 85%：保证最新内容有真实的未缓存部分
-        let max_cacheable = (profile.total_input_tokens as f64 * MAX_CACHEABLE_RATIO) as i32;
-        if last_tokens > max_cacheable {
-            last_tokens = max_cacheable;
-        }
 
         let mut matched_tokens = 0i32;
         for breakpoint in profile.breakpoints.iter().rev() {
@@ -854,6 +873,50 @@ mod tests {
         let opus_profile = tracker.build_claude_profile(&opus_req).unwrap();
         let opus_usage = tracker.compute(1, &opus_profile);
         assert_eq!(opus_usage, PromptCacheUsage::default());
+    }
+
+    #[test]
+    fn test_first_request_creation_is_ratio_capped() {
+        let tracker = PromptCacheTracker::new();
+        let profile = PromptCacheProfile {
+            breakpoints: vec![PromptCacheBreakpoint {
+                fingerprint: [1u8; 32],
+                cumulative_tokens: 10_000,
+                ttl: DEFAULT_PROMPT_CACHE_TTL,
+            }],
+            total_input_tokens: 10_000,
+            model: "claude-sonnet-4-6".to_string(),
+        };
+
+        let usage = tracker.compute(1, &profile);
+        assert_eq!(usage.cache_read_input_tokens, 0);
+        assert_eq!(usage.cache_creation_input_tokens, 8_500);
+        assert_eq!(usage.cache_creation_5m_input_tokens, 8_500);
+        assert_eq!(usage.cache_creation_1h_input_tokens, 0);
+    }
+
+    #[test]
+    fn test_profile_is_capped_to_model_context_window() {
+        let tracker = PromptCacheTracker::new();
+        let mut profile = PromptCacheProfile {
+            breakpoints: vec![PromptCacheBreakpoint {
+                fingerprint: [2u8; 32],
+                cumulative_tokens: 5_033_520,
+                ttl: DEFAULT_PROMPT_CACHE_TTL,
+            }],
+            total_input_tokens: 5_033_520,
+            model: "claude-opus-4-7".to_string(),
+        };
+        profile.cap_to_context_window();
+
+        assert_eq!(profile.total_input_tokens, 1_000_000);
+        assert_eq!(profile.breakpoints[0].cumulative_tokens, 1_000_000);
+
+        let usage = tracker.compute(1, &profile);
+        assert_eq!(usage.cache_read_input_tokens, 0);
+        assert_eq!(usage.cache_creation_input_tokens, 850_000);
+        assert_eq!(usage.cache_creation_5m_input_tokens, 850_000);
+        assert_eq!(usage.cache_creation_1h_input_tokens, 0);
     }
 
     /// 不变式：任何路径下 5m + 1h 明细之和必须等于 cache_creation_input_tokens。
