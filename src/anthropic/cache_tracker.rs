@@ -919,6 +919,26 @@ mod tests {
         assert_eq!(usage.cache_creation_1h_input_tokens, 0);
     }
 
+    #[test]
+    fn test_cache_read_is_capped_to_reportable_limit() {
+        let tracker = PromptCacheTracker::new();
+        let mut profile = PromptCacheProfile {
+            breakpoints: vec![PromptCacheBreakpoint {
+                fingerprint: [3u8; 32],
+                cumulative_tokens: 5_033_520,
+                ttl: DEFAULT_PROMPT_CACHE_TTL,
+            }],
+            total_input_tokens: 5_033_520,
+            model: "claude-opus-4-8".to_string(),
+        };
+        profile.cap_to_context_window();
+
+        tracker.update(1, &profile);
+        let usage = tracker.compute(1, &profile);
+        assert_eq!(usage.cache_creation_input_tokens, 0);
+        assert_eq!(usage.cache_read_input_tokens, 850_000);
+    }
+
     /// 不变式：任何路径下 5m + 1h 明细之和必须等于 cache_creation_input_tokens。
     /// sub2api 按明细独立计费（computeCacheCreationCost），二者不一致会导致
     /// "聚合为 0 但明细仍计费" 的口径错误。
