@@ -290,7 +290,7 @@ export function CredentialCard({
               ) : balance ? (
                 <span className="font-medium">
                   本地 {balance.localCreditsDelta.toFixed(4)} / 源头 {balance.sourceUsageDelta.toFixed(4)} / 未归因{' '}
-                  <span className={balance.unattributedUsageDelta > 0.0001 ? 'text-red-500' : ''}>
+                  <span className={balance.unattributedUsageDelta > 0.01 ? 'text-red-500' : ''}>
                     {balance.unattributedUsageDelta.toFixed(4)}
                   </span>
                   <span className="text-xs text-muted-foreground ml-1">
