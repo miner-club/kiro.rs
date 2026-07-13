@@ -39,6 +39,11 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const [batchRefreshing, setBatchRefreshing] = useState(false)
   const [batchRefreshProgress, setBatchRefreshProgress] = useState({ current: 0, total: 0 })
   const cancelVerifyRef = useRef(false)
+  // 已成功拉到余额的凭据 ID（写进 balanceMap 后才记），避免 30s 刷新/重渲染重复打源头。
+  // 只有"成功"才进这里——失败/取消不记，留给后续 effect 重试。
+  const balanceFetchedRef = useRef<Set<number>>(new Set())
+  // 正在拉取中的凭据 ID，避免同一 effect 内或并发 effect 对同一 ID 重复发起。
+  const balanceInFlightRef = useRef<Set<number>>(new Set())
   const [currentPage, setCurrentPage] = useState(1)
   const itemsPerPage = 12
   const [darkMode, setDarkMode] = useState(() => {
@@ -81,6 +86,14 @@ export function Dashboard({ onLogout }: DashboardProps) {
 
     const validIds = new Set(data.credentials.map(credential => credential.id))
 
+    // 同步清理去重 ref，避免删除后残留（也让 id 复用时能重新拉取）
+    balanceFetchedRef.current.forEach(id => {
+      if (!validIds.has(id)) balanceFetchedRef.current.delete(id)
+    })
+    balanceInFlightRef.current.forEach(id => {
+      if (!validIds.has(id)) balanceInFlightRef.current.delete(id)
+    })
+
     setBalanceMap(prev => {
       const next = new Map<number, BalanceResponse>()
       prev.forEach((value, id) => {
@@ -104,6 +117,63 @@ export function Dashboard({ onLogout }: DashboardProps) {
       return next.size === prev.size ? prev : next
     })
   }, [data?.credentials])
+
+  // 进入/翻到某页时自动拉取该页启用凭据的源头本月用量，让"源头本月用量"常显（走后端 300s 缓存）。
+  // 禁用凭据跳过，避免对被封账号发查询。去重用两个 ref：fetched=已成功、inFlight=拉取中；
+  // 只有真正写进 balanceMap 才记 fetched，失败/取消不记 → StrictMode 双跑、翻页中途切走都能重试，
+  // 不会出现"发过请求但永远显 —"。已发起的请求即使 effect 被 cancel 也照常写 balanceMap（跨页有效）。
+  useEffect(() => {
+    let cancelled = false
+
+    const run = async () => {
+      const ids = currentCredentials
+        .filter(c =>
+          !c.disabled &&
+          !balanceFetchedRef.current.has(c.id) &&
+          !balanceInFlightRef.current.has(c.id)
+        )
+        .map(c => c.id)
+
+      for (const id of ids) {
+        if (cancelled) return
+        balanceInFlightRef.current.add(id)
+
+        setLoadingBalanceIds(prev => {
+          const next = new Set(prev)
+          next.add(id)
+          return next
+        })
+
+        try {
+          const balance = await getCredentialBalance(id)
+          // 成功即写入并标记 fetched，不受 cancelled 影响（balanceMap 按 id 存，跨页仍有效）
+          balanceFetchedRef.current.add(id)
+          setBalanceMap(prev => {
+            const next = new Map(prev)
+            next.set(id, balance)
+            return next
+          })
+        } catch {
+          // 拉不到就保持"—"，不记 fetched，后续 effect 会重试；不打断也不告警
+        } finally {
+          balanceInFlightRef.current.delete(id)
+          setLoadingBalanceIds(prev => {
+            const next = new Set(prev)
+            next.delete(id)
+            return next
+          })
+        }
+      }
+    }
+
+    run()
+
+    return () => {
+      cancelled = true
+    }
+    // data?.credentials 引用在 react-query 结构共享下未变化时稳定；currentPage 变化时拉新页
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data?.credentials, currentPage])
 
   const toggleDarkMode = () => {
     setDarkMode(!darkMode)

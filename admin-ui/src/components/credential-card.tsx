@@ -49,6 +49,11 @@ function formatLastUsed(lastUsedAt: string | null): string {
   return `${days} 天前`
 }
 
+function formatResetDate(nextResetAt: number | null): string {
+  if (!nextResetAt) return ''
+  return new Date(nextResetAt * 1000).toLocaleDateString('zh-CN')
+}
+
 export function CredentialCard({
   credential,
   onViewBalance,
@@ -253,6 +258,23 @@ export function CredentialCard({
             <div>
               <span className="text-muted-foreground">成功次数：</span>
               <span className="font-medium">{credential.successCount}</span>
+            </div>
+            <div>
+              <span className="text-muted-foreground">源头本月用量：</span>
+              {loadingBalance ? (
+                <Loader2 className="inline w-3 h-3 animate-spin" />
+              ) : balance ? (
+                <span className="font-medium">
+                  {balance.currentUsage.toFixed(2)} / {balance.usageLimit.toFixed(2)}
+                  {balance.nextResetAt && (
+                    <span className="text-xs text-muted-foreground ml-1">
+                      ({formatResetDate(balance.nextResetAt)} 重置)
+                    </span>
+                  )}
+                </span>
+              ) : (
+                <span className="text-muted-foreground">—</span>
+              )}
             </div>
             <div className="col-span-2">
               <span className="text-muted-foreground">最后调用：</span>
