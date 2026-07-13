@@ -21,6 +21,9 @@ export interface CredentialStatusItem {
   apiKeyHash?: string
   maskedApiKey?: string
   successCount: number
+  meteredCredits: number
+  meteredRequestCount: number
+  meteringStartedAt: string | null
   lastUsedAt: string | null
   hasProxy: boolean
   proxyUrl?: string
@@ -38,6 +41,11 @@ export interface BalanceResponse {
   remaining: number
   usagePercentage: number
   nextResetAt: number | null
+  localCreditsDelta: number
+  localMeteredRequestCount: number
+  sourceUsageDelta: number
+  unattributedUsageDelta: number
+  reconciliationBaselineAt: string
 }
 
 // 成功响应

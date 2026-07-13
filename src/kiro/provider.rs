@@ -21,12 +21,50 @@ use crate::kiro::token_manager::{
 };
 use crate::model::config::TlsBackend;
 use parking_lot::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// 每个凭据的最大重试次数
 const MAX_RETRIES_PER_CREDENTIAL: usize = 3;
 
 /// 总重试次数硬上限（避免无限重试）
 const MAX_TOTAL_RETRIES: usize = 9;
+
+/// API 调用结果：响应 + 实际使用的凭据 ID
+pub struct ApiCallResult {
+    pub response: reqwest::Response,
+    pub credential_id: u64,
+}
+
+/// Collects the final metering value and persists it once per upstream request.
+#[derive(Clone)]
+pub struct MeteringRecorder {
+    token_manager: Arc<MultiTokenManager>,
+    credential_id: u64,
+    latest_credits: Arc<Mutex<Option<f64>>>,
+    committed: Arc<AtomicBool>,
+}
+
+impl MeteringRecorder {
+    pub fn observe(&self, credits: Option<f64>) {
+        let Some(credits) = credits else { return };
+        if credits.is_finite() && credits >= 0.0 {
+            *self.latest_credits.lock() = Some(credits);
+        }
+    }
+
+    pub fn commit(&self) {
+        if self
+            .committed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            if let Some(credits) = *self.latest_credits.lock() {
+                self.token_manager
+                    .report_metering_usage(self.credential_id, credits);
+            }
+        }
+    }
+}
 
 /// Kiro API Provider
 ///
@@ -49,6 +87,14 @@ pub struct KiroProvider {
 }
 
 impl KiroProvider {
+    pub fn metering_recorder(&self, credential_id: u64) -> MeteringRecorder {
+        MeteringRecorder {
+            token_manager: self.token_manager.clone(),
+            credential_id,
+            latest_credits: Arc::new(Mutex::new(None)),
+            committed: Arc::new(AtomicBool::new(false)),
+        }
+    }
     /// 创建带代理配置和端点注册表的 KiroProvider 实例
     ///
     /// # Arguments
@@ -111,12 +157,12 @@ impl KiroProvider {
     /// 发送非流式 API 请求
     ///
     /// 支持多凭据故障转移（见 [`Self::call_api_with_retry`]）
-    pub async fn call_api(&self, request_body: &str) -> anyhow::Result<reqwest::Response> {
+    pub async fn call_api(&self, request_body: &str) -> anyhow::Result<ApiCallResult> {
         self.call_api_with_retry(request_body, false).await
     }
 
     /// 发送流式 API 请求
-    pub async fn call_api_stream(&self, request_body: &str) -> anyhow::Result<reqwest::Response> {
+    pub async fn call_api_stream(&self, request_body: &str) -> anyhow::Result<ApiCallResult> {
         self.call_api_with_retry(request_body, true).await
     }
 
@@ -333,7 +379,7 @@ impl KiroProvider {
         &self,
         request_body: &str,
         is_stream: bool,
-    ) -> anyhow::Result<reqwest::Response> {
+    ) -> anyhow::Result<ApiCallResult> {
         let total_credentials = self.token_manager.total_count();
         let max_retries = (total_credentials * MAX_RETRIES_PER_CREDENTIAL).min(MAX_TOTAL_RETRIES);
         let mut last_error: Option<anyhow::Error> = None;
@@ -418,7 +464,10 @@ impl KiroProvider {
             // 成功响应
             if status.is_success() {
                 self.token_manager.report_success(ctx.id);
-                return Ok(response);
+                return Ok(ApiCallResult {
+                    response,
+                    credential_id: ctx.id,
+                });
             }
 
             // 失败响应：读取 body 用于日志/错误信息
@@ -645,7 +694,12 @@ impl KiroProvider {
 
 #[cfg(test)]
 mod tests {
-    use super::KiroProvider;
+    use super::{KiroProvider, MeteringRecorder};
+    use crate::kiro::model::credentials::KiroCredentials;
+    use crate::kiro::token_manager::MultiTokenManager;
+    use parking_lot::Mutex;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
 
     #[test]
     fn test_extract_conversation_id_from_request() {
@@ -673,5 +727,34 @@ mod tests {
     #[test]
     fn test_extract_conversation_id_missing_is_none() {
         assert!(KiroProvider::extract_conversation_id_from_request("{}").is_none());
+    }
+
+    #[test]
+    fn metering_recorder_commits_latest_value_once() {
+        let mut credential = KiroCredentials::default();
+        credential.id = Some(1);
+        let manager = Arc::new(
+            MultiTokenManager::new(
+                crate::model::config::Config::default(),
+                vec![credential],
+                None,
+                None,
+                false,
+            )
+            .unwrap(),
+        );
+        let recorder = MeteringRecorder {
+            token_manager: manager.clone(),
+            credential_id: 1,
+            latest_credits: Arc::new(Mutex::new(None)),
+            committed: Arc::new(AtomicBool::new(false)),
+        };
+        recorder.observe(Some(1.25));
+        recorder.observe(Some(1.5));
+        recorder.commit();
+        recorder.commit();
+        let entry = manager.snapshot().entries.remove(0);
+        assert_eq!(entry.metered_credits, 1.5);
+        assert_eq!(entry.metered_request_count, 1);
     }
 }

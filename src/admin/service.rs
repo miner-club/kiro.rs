@@ -81,6 +81,9 @@ impl AdminService {
                 masked_api_key: entry.masked_api_key,
                 email: entry.email,
                 success_count: entry.success_count,
+                metered_credits: entry.metered_credits,
+                metered_request_count: entry.metered_request_count,
+                metering_started_at: entry.metering_started_at,
                 last_used_at: entry.last_used_at.clone(),
                 has_proxy: entry.has_proxy,
                 proxy_url: entry.proxy_url,
@@ -136,9 +139,13 @@ impl AdminService {
     }
 
     /// 获取凭据余额（带缓存）
-    pub async fn get_balance(&self, id: u64) -> Result<BalanceResponse, AdminServiceError> {
+    pub async fn get_balance(
+        &self,
+        id: u64,
+        force_refresh: bool,
+    ) -> Result<BalanceResponse, AdminServiceError> {
         // 先查缓存
-        {
+        if !force_refresh {
             let cache = self.balance_cache.lock();
             if let Some(cached) = cache.get(&id) {
                 let now = Utc::now().timestamp() as f64;
@@ -184,6 +191,10 @@ impl AdminService {
         } else {
             0.0
         };
+        let reconciliation = self
+            .token_manager
+            .reconcile_usage(id, current_usage, usage.next_date_reset)
+            .ok_or(AdminServiceError::NotFound { id })?;
 
         Ok(BalanceResponse {
             id,
@@ -193,6 +204,11 @@ impl AdminService {
             remaining,
             usage_percentage,
             next_reset_at: usage.next_date_reset,
+            local_credits_delta: reconciliation.local_credits_delta,
+            local_metered_request_count: reconciliation.local_request_count_delta,
+            source_usage_delta: reconciliation.source_usage_delta,
+            unattributed_usage_delta: reconciliation.unattributed_delta,
+            reconciliation_baseline_at: reconciliation.baseline_at,
         })
     }
 

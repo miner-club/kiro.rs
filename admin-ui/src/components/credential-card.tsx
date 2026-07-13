@@ -260,6 +260,13 @@ export function CredentialCard({
               <span className="font-medium">{credential.successCount}</span>
             </div>
             <div>
+              <span className="text-muted-foreground">本地累计 credits：</span>
+              <span className="font-medium">{credential.meteredCredits.toFixed(4)}</span>
+              <span className="text-xs text-muted-foreground ml-1">
+                ({credential.meteredRequestCount} 次计量)
+              </span>
+            </div>
+            <div>
               <span className="text-muted-foreground">源头本月用量：</span>
               {loadingBalance ? (
                 <Loader2 className="inline w-3 h-3 animate-spin" />
@@ -271,6 +278,24 @@ export function CredentialCard({
                       ({formatResetDate(balance.nextResetAt)} 重置)
                     </span>
                   )}
+                </span>
+              ) : (
+                <span className="text-muted-foreground">—</span>
+              )}
+            </div>
+            <div className="col-span-2">
+              <span className="text-muted-foreground">基线后对账：</span>
+              {loadingBalance ? (
+                <Loader2 className="inline w-3 h-3 animate-spin" />
+              ) : balance ? (
+                <span className="font-medium">
+                  本地 {balance.localCreditsDelta.toFixed(4)} / 源头 {balance.sourceUsageDelta.toFixed(4)} / 未归因{' '}
+                  <span className={balance.unattributedUsageDelta > 0.0001 ? 'text-red-500' : ''}>
+                    {balance.unattributedUsageDelta.toFixed(4)}
+                  </span>
+                  <span className="text-xs text-muted-foreground ml-1">
+                    ({balance.localMeteredRequestCount} 次，基线 {new Date(balance.reconciliationBaselineAt).toLocaleString('zh-CN')})
+                  </span>
                 </span>
               ) : (
                 <span className="text-muted-foreground">—</span>

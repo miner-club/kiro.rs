@@ -34,6 +34,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const [verifyResults, setVerifyResults] = useState<Map<number, VerifyResult>>(new Map())
   const [balanceMap, setBalanceMap] = useState<Map<number, BalanceResponse>>(new Map())
   const [loadingBalanceIds, setLoadingBalanceIds] = useState<Set<number>>(new Set())
+  const [balanceRefreshKey, setBalanceRefreshKey] = useState(0)
   const [queryingInfo, setQueryingInfo] = useState(false)
   const [queryInfoProgress, setQueryInfoProgress] = useState({ current: 0, total: 0 })
   const [batchRefreshing, setBatchRefreshing] = useState(false)
@@ -145,7 +146,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
         })
 
         try {
-          const balance = await getCredentialBalance(id)
+          const balance = await getCredentialBalance(id, balanceRefreshKey > 0)
           // 成功即写入并标记 fetched，不受 cancelled 影响（balanceMap 按 id 存，跨页仍有效）
           balanceFetchedRef.current.add(id)
           setBalanceMap(prev => {
@@ -173,7 +174,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
     }
     // data?.credentials 引用在 react-query 结构共享下未变化时稳定；currentPage 变化时拉新页
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data?.credentials, currentPage])
+  }, [data?.credentials, currentPage, balanceRefreshKey])
 
   const toggleDarkMode = () => {
     setDarkMode(!darkMode)
@@ -186,8 +187,10 @@ export function Dashboard({ onLogout }: DashboardProps) {
   }
 
   const handleRefresh = () => {
+    balanceFetchedRef.current.clear()
+    setBalanceRefreshKey(key => key + 1)
     refetch()
-    toast.success('已刷新凭据列表')
+    toast.success('已刷新凭据列表和用量对账')
   }
 
   const handleLogout = () => {

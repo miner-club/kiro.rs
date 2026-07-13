@@ -2,6 +2,12 @@
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Default, Deserialize)]
+pub struct BalanceQuery {
+    #[serde(default)]
+    pub refresh: bool,
+}
+
 // ============ 凭据状态 ============
 
 /// 所有凭据状态响应
@@ -48,6 +54,9 @@ pub struct CredentialStatusItem {
     pub email: Option<String>,
     /// API 调用成功次数
     pub success_count: u64,
+    pub metered_credits: f64,
+    pub metered_request_count: u64,
+    pub metering_started_at: Option<String>,
     /// 最后一次 API 调用时间（RFC3339 格式）
     pub last_used_at: Option<String>,
     /// 是否配置了凭据级代理
@@ -183,6 +192,11 @@ pub struct BalanceResponse {
     pub usage_percentage: f64,
     /// 下次重置时间（Unix 时间戳）
     pub next_reset_at: Option<f64>,
+    pub local_credits_delta: f64,
+    pub local_metered_request_count: u64,
+    pub source_usage_delta: f64,
+    pub unattributed_usage_delta: f64,
+    pub reconciliation_baseline_at: String,
 }
 
 // ============ 负载均衡配置 ============

@@ -2,15 +2,15 @@
 
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     response::IntoResponse,
 };
 
 use super::{
     middleware::AdminState,
     types::{
-        AddCredentialRequest, SetDisabledRequest, SetLoadBalancingModeRequest, SetPriorityRequest,
-        SuccessResponse,
+        AddCredentialRequest, BalanceQuery, SetDisabledRequest, SetLoadBalancingModeRequest,
+        SetPriorityRequest, SuccessResponse,
     },
 };
 
@@ -75,8 +75,9 @@ pub async fn reset_failure_count(
 pub async fn get_credential_balance(
     State(state): State<AdminState>,
     Path(id): Path<u64>,
+    Query(query): Query<BalanceQuery>,
 ) -> impl IntoResponse {
-    match state.service.get_balance(id).await {
+    match state.service.get_balance(id, query.refresh).await {
         Ok(response) => Json(response).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }
