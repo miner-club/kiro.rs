@@ -60,6 +60,13 @@ pub struct CredentialStatusItem {
     /// 禁用原因
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disabled_reason: Option<String>,
+    /// 临时封禁冷却到期时间
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disabled_until: Option<String>,
+    /// 临时封禁连续档位计数
+    pub suspend_streak: u32,
+    /// 是否处于冷却恢复后的 probation 单飞观察期
+    pub probation: bool,
     /// 端点名称（决定该凭据走哪套 Kiro API，已回退到默认端点）
     pub endpoint: String,
 }

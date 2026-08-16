@@ -86,6 +86,9 @@ impl AdminService {
                 proxy_url: entry.proxy_url,
                 refresh_failure_count: entry.refresh_failure_count,
                 disabled_reason: entry.disabled_reason,
+                disabled_until: entry.disabled_until,
+                suspend_streak: entry.suspend_streak,
+                probation: entry.probation,
                 endpoint: entry.endpoint.unwrap_or_else(|| default_endpoint.clone()),
             })
             .collect();
@@ -448,7 +451,8 @@ impl AdminService {
         let msg = e.to_string();
         if msg.contains("不存在") {
             AdminServiceError::NotFound { id }
-        } else if msg.contains("只能删除已禁用的凭据") || msg.contains("请先禁用凭据") {
+        } else if msg.contains("只能删除已禁用的凭据") || msg.contains("请先禁用凭据")
+        {
             AdminServiceError::InvalidCredential(msg)
         } else {
             AdminServiceError::InternalError(msg)

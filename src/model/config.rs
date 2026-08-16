@@ -91,6 +91,10 @@ pub struct Config {
     #[serde(default = "default_load_balancing_mode")]
     pub load_balancing_mode: String,
 
+    /// 单请求允许切换凭据的最大次数
+    #[serde(default = "default_max_switch_attempts")]
+    pub max_switch_attempts: u32,
+
     /// 是否开启非流式响应的 thinking 块提取（默认 true）
     ///
     /// 启用后，非流式响应中的 `<thinking>...</thinking>` 标签会被解析为
@@ -151,6 +155,10 @@ fn default_load_balancing_mode() -> String {
     "priority".to_string()
 }
 
+fn default_max_switch_attempts() -> u32 {
+    2
+}
+
 fn default_extract_thinking() -> bool {
     true
 }
@@ -181,6 +189,7 @@ impl Default for Config {
             proxy_password: None,
             admin_api_key: None,
             load_balancing_mode: default_load_balancing_mode(),
+            max_switch_attempts: default_max_switch_attempts(),
             extract_thinking: default_extract_thinking(),
             default_endpoint: default_endpoint(),
             endpoints: HashMap::new(),
@@ -236,7 +245,8 @@ impl Config {
             .ok_or_else(|| anyhow::anyhow!("配置文件路径未知，无法保存配置"))?;
 
         let content = serde_json::to_string_pretty(self).context("序列化配置失败")?;
-        fs::write(path, content).with_context(|| format!("写入配置文件失败: {}", path.display()))?;
+        fs::write(path, content)
+            .with_context(|| format!("写入配置文件失败: {}", path.display()))?;
         Ok(())
     }
 }
