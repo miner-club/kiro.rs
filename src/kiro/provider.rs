@@ -15,7 +15,10 @@ use crate::http_client::{ProxyConfig, build_client};
 use crate::kiro::endpoint::{KiroEndpoint, RequestContext};
 use crate::kiro::machine_id;
 use crate::kiro::model::credentials::KiroCredentials;
-use crate::kiro::token_manager::MultiTokenManager;
+use crate::kiro::token_manager::{
+    MultiTokenManager, RefreshTemporarilySuspendedError, body_indicates_temporary_suspend,
+    error_requests_no_switch,
+};
 use crate::model::config::TlsBackend;
 use parking_lot::Mutex;
 
@@ -66,8 +69,8 @@ impl KiroProvider {
         );
         let tls_backend = token_manager.config().tls_backend;
         // 预热：构建全局代理对应的 Client
-        let initial_client = build_client(proxy.as_ref(), 720, tls_backend)
-            .expect("创建 HTTP 客户端失败");
+        let initial_client =
+            build_client(proxy.as_ref(), 720, tls_backend).expect("创建 HTTP 客户端失败");
         let mut cache = HashMap::new();
         cache.insert(proxy.clone(), initial_client);
 
@@ -94,10 +97,7 @@ impl KiroProvider {
     }
 
     /// 根据凭据选择 endpoint 实现
-    fn endpoint_for(
-        &self,
-        credentials: &KiroCredentials,
-    ) -> anyhow::Result<Arc<dyn KiroEndpoint>> {
+    fn endpoint_for(&self, credentials: &KiroCredentials) -> anyhow::Result<Arc<dyn KiroEndpoint>> {
         let name = credentials
             .endpoint
             .as_deref()
@@ -131,12 +131,17 @@ impl KiroProvider {
         let max_retries = (total_credentials * MAX_RETRIES_PER_CREDENTIAL).min(MAX_TOTAL_RETRIES);
         let mut last_error: Option<anyhow::Error> = None;
         let mut force_refreshed: HashSet<u64> = HashSet::new();
+        let max_switch_attempts = self.token_manager.config().max_switch_attempts as usize;
+        let mut switch_attempts = 0usize;
 
         for attempt in 0..max_retries {
             // MCP 调用（WebSearch 等工具）不涉及模型选择，无需按模型过滤凭据
             let ctx = match self.token_manager.acquire_context(None).await {
                 Ok(c) => c,
                 Err(e) => {
+                    if error_requests_no_switch(&e) {
+                        anyhow::bail!("MCP 请求失败: {}", e);
+                    }
                     last_error = Some(e);
                     continue;
                 }
@@ -176,6 +181,7 @@ impl KiroProvider {
             let response = match request.send().await {
                 Ok(resp) => resp,
                 Err(e) => {
+                    self.token_manager.report_request_finished(ctx.id);
                     tracing::warn!(
                         "MCP 请求发送失败（尝试 {}/{}）: {}",
                         attempt + 1,
@@ -207,24 +213,59 @@ impl KiroProvider {
                 if !has_available {
                     anyhow::bail!("MCP 请求失败（所有凭据已用尽）: {} {}", status, body);
                 }
+                switch_attempts += 1;
+                if switch_attempts > max_switch_attempts {
+                    anyhow::bail!(
+                        "MCP 请求失败（已达到跨凭据切换上限 {}）: {} {}",
+                        max_switch_attempts,
+                        status,
+                        body
+                    );
+                }
                 last_error = Some(anyhow::anyhow!("MCP 请求失败: {} {}", status, body));
                 continue;
             }
 
             // 400 Bad Request
             if status.as_u16() == 400 {
+                self.token_manager.report_request_finished(ctx.id);
                 anyhow::bail!("MCP 请求失败: {} {}", status, body);
             }
 
             // 401/403 凭据问题
             if matches!(status.as_u16(), 401 | 403) {
+                if status.as_u16() == 403 && body_indicates_temporary_suspend(&body) {
+                    self.token_manager.report_temporarily_suspended(ctx.id);
+                    anyhow::bail!(
+                        "MCP 请求失败（凭据 #{} 临时封禁，当前请求不切换凭据）: {} {}",
+                        ctx.id,
+                        status,
+                        body
+                    );
+                }
+
                 // token 被上游失效：先尝试 force-refresh，每凭据仅一次机会
                 if endpoint.is_bearer_token_invalid(&body) && !force_refreshed.contains(&ctx.id) {
                     force_refreshed.insert(ctx.id);
                     tracing::info!("凭据 #{} token 疑似被上游失效，尝试强制刷新", ctx.id);
-                    if self.token_manager.force_refresh_token_for(ctx.id).await.is_ok() {
-                        tracing::info!("凭据 #{} token 强制刷新成功，重试请求", ctx.id);
-                        continue;
+                    match self.token_manager.force_refresh_token_for(ctx.id).await {
+                        Ok(()) => {
+                            self.token_manager.report_request_finished(ctx.id);
+                            tracing::info!("凭据 #{} token 强制刷新成功，重试请求", ctx.id);
+                            continue;
+                        }
+                        Err(e)
+                            if e.downcast_ref::<RefreshTemporarilySuspendedError>()
+                                .is_some() =>
+                        {
+                            self.token_manager.report_temporarily_suspended(ctx.id);
+                            anyhow::bail!(
+                                "MCP 请求失败（凭据 #{} refresh 命中临时封禁，当前请求不切换凭据）: {}",
+                                ctx.id,
+                                e
+                            );
+                        }
+                        Err(_) => {}
                     }
                     tracing::warn!("凭据 #{} token 强制刷新失败，计入失败", ctx.id);
                 }
@@ -233,12 +274,22 @@ impl KiroProvider {
                 if !has_available {
                     anyhow::bail!("MCP 请求失败（所有凭据已用尽）: {} {}", status, body);
                 }
+                switch_attempts += 1;
+                if switch_attempts > max_switch_attempts {
+                    anyhow::bail!(
+                        "MCP 请求失败（已达到跨凭据切换上限 {}）: {} {}",
+                        max_switch_attempts,
+                        status,
+                        body
+                    );
+                }
                 last_error = Some(anyhow::anyhow!("MCP 请求失败: {} {}", status, body));
                 continue;
             }
 
             // 瞬态错误
             if matches!(status.as_u16(), 408 | 429) || status.is_server_error() {
+                self.token_manager.report_request_finished(ctx.id);
                 tracing::warn!(
                     "MCP 请求失败（上游瞬态错误，尝试 {}/{}）: {} {}",
                     attempt + 1,
@@ -255,10 +306,12 @@ impl KiroProvider {
 
             // 其他 4xx
             if status.is_client_error() {
+                self.token_manager.report_request_finished(ctx.id);
                 anyhow::bail!("MCP 请求失败: {} {}", status, body);
             }
 
             // 兜底
+            self.token_manager.report_request_finished(ctx.id);
             last_error = Some(anyhow::anyhow!("MCP 请求失败: {} {}", status, body));
             if attempt + 1 < max_retries {
                 sleep(Self::retry_delay(attempt)).await;
@@ -289,12 +342,22 @@ impl KiroProvider {
 
         // 尝试从请求体中提取模型信息
         let model = Self::extract_model_from_request(request_body);
+        let conversation_id = Self::extract_conversation_id_from_request(request_body);
+        let max_switch_attempts = self.token_manager.config().max_switch_attempts as usize;
+        let mut switch_attempts = 0usize;
 
         for attempt in 0..max_retries {
             // 获取调用上下文（绑定 index、credentials、token）
-            let ctx = match self.token_manager.acquire_context(model.as_deref()).await {
+            let ctx = match self
+                .token_manager
+                .acquire_context_for_session(model.as_deref(), conversation_id.as_deref())
+                .await
+            {
                 Ok(c) => c,
                 Err(e) => {
+                    if error_requests_no_switch(&e) {
+                        anyhow::bail!("{} API 请求失败: {}", api_type, e);
+                    }
                     last_error = Some(e);
                     continue;
                 }
@@ -333,6 +396,7 @@ impl KiroProvider {
             let response = match request.send().await {
                 Ok(resp) => resp,
                 Err(e) => {
+                    self.token_manager.report_request_finished(ctx.id);
                     tracing::warn!(
                         "API 请求发送失败（尝试 {}/{}）: {}",
                         attempt + 1,
@@ -379,6 +443,16 @@ impl KiroProvider {
                         body
                     );
                 }
+                switch_attempts += 1;
+                if switch_attempts > max_switch_attempts {
+                    anyhow::bail!(
+                        "{} API 请求失败（已达到跨凭据切换上限 {}）: {} {}",
+                        api_type,
+                        max_switch_attempts,
+                        status,
+                        body
+                    );
+                }
 
                 last_error = Some(anyhow::anyhow!(
                     "{} API 请求失败: {} {}",
@@ -391,6 +465,7 @@ impl KiroProvider {
 
             // 400 Bad Request - 请求问题，重试/切换凭据无意义
             if status.as_u16() == 400 {
+                self.token_manager.report_request_finished(ctx.id);
                 anyhow::bail!("{} API 请求失败: {} {}", api_type, status, body);
             }
 
@@ -404,13 +479,40 @@ impl KiroProvider {
                     body
                 );
 
+                if status.as_u16() == 403 && body_indicates_temporary_suspend(&body) {
+                    self.token_manager.report_temporarily_suspended(ctx.id);
+                    anyhow::bail!(
+                        "{} API 请求失败（凭据 #{} 临时封禁，当前请求不切换凭据）: {} {}",
+                        api_type,
+                        ctx.id,
+                        status,
+                        body
+                    );
+                }
+
                 // token 被上游失效：先尝试 force-refresh，每凭据仅一次机会
                 if endpoint.is_bearer_token_invalid(&body) && !force_refreshed.contains(&ctx.id) {
                     force_refreshed.insert(ctx.id);
                     tracing::info!("凭据 #{} token 疑似被上游失效，尝试强制刷新", ctx.id);
-                    if self.token_manager.force_refresh_token_for(ctx.id).await.is_ok() {
-                        tracing::info!("凭据 #{} token 强制刷新成功，重试请求", ctx.id);
-                        continue;
+                    match self.token_manager.force_refresh_token_for(ctx.id).await {
+                        Ok(()) => {
+                            self.token_manager.report_request_finished(ctx.id);
+                            tracing::info!("凭据 #{} token 强制刷新成功，重试请求", ctx.id);
+                            continue;
+                        }
+                        Err(e)
+                            if e.downcast_ref::<RefreshTemporarilySuspendedError>()
+                                .is_some() =>
+                        {
+                            self.token_manager.report_temporarily_suspended(ctx.id);
+                            anyhow::bail!(
+                                "{} API 请求失败（凭据 #{} refresh 命中临时封禁，当前请求不切换凭据）: {}",
+                                api_type,
+                                ctx.id,
+                                e
+                            );
+                        }
+                        Err(_) => {}
                     }
                     tracing::warn!("凭据 #{} token 强制刷新失败，计入失败", ctx.id);
                 }
@@ -420,6 +522,16 @@ impl KiroProvider {
                     anyhow::bail!(
                         "{} API 请求失败（所有凭据已用尽）: {} {}",
                         api_type,
+                        status,
+                        body
+                    );
+                }
+                switch_attempts += 1;
+                if switch_attempts > max_switch_attempts {
+                    anyhow::bail!(
+                        "{} API 请求失败（已达到跨凭据切换上限 {}）: {} {}",
+                        api_type,
+                        max_switch_attempts,
                         status,
                         body
                     );
@@ -437,6 +549,7 @@ impl KiroProvider {
             // 429/408/5xx - 瞬态上游错误：重试但不禁用或切换凭据
             // （避免 429 high traffic / 502 high load 等瞬态错误把所有凭据锁死）
             if matches!(status.as_u16(), 408 | 429) || status.is_server_error() {
+                self.token_manager.report_request_finished(ctx.id);
                 tracing::warn!(
                     "API 请求失败（上游瞬态错误，尝试 {}/{}）: {} {}",
                     attempt + 1,
@@ -458,10 +571,12 @@ impl KiroProvider {
 
             // 其他 4xx - 通常为请求/配置问题：直接返回，不计入凭据失败
             if status.is_client_error() {
+                self.token_manager.report_request_finished(ctx.id);
                 anyhow::bail!("{} API 请求失败: {} {}", api_type, status, body);
             }
 
             // 兜底：当作可重试的瞬态错误处理（不切换凭据）
+            self.token_manager.report_request_finished(ctx.id);
             tracing::warn!(
                 "API 请求失败（未知错误，尝试 {}/{}）: {} {}",
                 attempt + 1,
@@ -506,6 +621,16 @@ impl KiroProvider {
             .map(|s| s.to_string())
     }
 
+    fn extract_conversation_id_from_request(request_body: &str) -> Option<String> {
+        use serde_json::Value;
+
+        let json: Value = serde_json::from_str(request_body).ok()?;
+        json.get("conversationState")?
+            .get("conversationId")?
+            .as_str()
+            .map(str::to_string)
+    }
+
     fn retry_delay(attempt: usize) -> Duration {
         // 指数退避 + 少量抖动，避免上游抖动时放大故障
         const BASE_MS: u64 = 200;
@@ -515,5 +640,38 @@ impl KiroProvider {
         let jitter_max = (backoff / 4).max(1);
         let jitter = fastrand::u64(0..=jitter_max);
         Duration::from_millis(backoff.saturating_add(jitter))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::KiroProvider;
+
+    #[test]
+    fn test_extract_conversation_id_from_request() {
+        let body = r#"{
+            "conversationState": {
+                "conversationId": "session-123",
+                "currentMessage": {
+                    "userInputMessage": {
+                        "modelId": "claude-opus-4-8"
+                    }
+                }
+            }
+        }"#;
+
+        assert_eq!(
+            KiroProvider::extract_conversation_id_from_request(body).as_deref(),
+            Some("session-123")
+        );
+        assert_eq!(
+            KiroProvider::extract_model_from_request(body).as_deref(),
+            Some("claude-opus-4-8")
+        );
+    }
+
+    #[test]
+    fn test_extract_conversation_id_missing_is_none() {
+        assert!(KiroProvider::extract_conversation_id_from_request("{}").is_none());
     }
 }
