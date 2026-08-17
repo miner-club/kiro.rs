@@ -93,6 +93,12 @@ pub struct KiroCredentials {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proxy_password: Option<String>,
 
+    /// 是否要求该凭据必须走凭据级代理。
+    /// 启用后 proxyUrl 缺失、为空或为 direct 时直接失败，不回落全局代理/直连。
+    #[serde(default)]
+    #[serde(skip_serializing_if = "is_false")]
+    pub require_credential_proxy: bool,
+
     /// 凭据是否被禁用（默认为 false）
     #[serde(default)]
     pub disabled: bool,
@@ -114,6 +120,10 @@ pub struct KiroCredentials {
 /// 判断是否为零（用于跳过序列化）
 fn is_zero(value: &u32) -> bool {
     *value == 0
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 fn canonicalize_auth_method_value(value: &str) -> &str {
@@ -218,9 +228,28 @@ impl KiroCredentials {
     /// 获取有效的代理配置
     /// 优先级：凭据代理 > 全局代理 > 无代理
     /// 特殊值 "direct" 表示显式不使用代理（即使全局配置了代理）
+    #[cfg(test)]
     pub fn effective_proxy(&self, global_proxy: Option<&ProxyConfig>) -> Option<ProxyConfig> {
+        self.resolve_proxy(global_proxy).unwrap_or(None)
+    }
+
+    pub fn resolve_proxy(
+        &self,
+        global_proxy: Option<&ProxyConfig>,
+    ) -> anyhow::Result<Option<ProxyConfig>> {
         match self.proxy_url.as_deref() {
-            Some(url) if url.eq_ignore_ascii_case(Self::PROXY_DIRECT) => None,
+            Some(url) if url.eq_ignore_ascii_case(Self::PROXY_DIRECT) => {
+                if self.require_credential_proxy {
+                    anyhow::bail!("凭据要求凭据级代理，但 proxyUrl=direct");
+                }
+                Ok(None)
+            }
+            Some(url) if url.trim().is_empty() => {
+                if self.require_credential_proxy {
+                    anyhow::bail!("凭据要求凭据级代理，但 proxyUrl 为空");
+                }
+                Ok(global_proxy.cloned())
+            }
             Some(url) => {
                 let mut proxy = ProxyConfig::new(url);
                 if let (Some(username), Some(password)) =
@@ -228,9 +257,12 @@ impl KiroCredentials {
                 {
                     proxy = proxy.with_auth(username, password);
                 }
-                Some(proxy)
+                Ok(Some(proxy))
             }
-            None => global_proxy.cloned(),
+            None if self.require_credential_proxy => {
+                anyhow::bail!("凭据要求凭据级代理，但未配置 proxyUrl");
+            }
+            None => Ok(global_proxy.cloned()),
         }
     }
 
@@ -340,6 +372,7 @@ mod tests {
             proxy_url: None,
             proxy_username: None,
             proxy_password: None,
+            require_credential_proxy: false,
             disabled: false,
             kiro_api_key: None,
             endpoint: None,
@@ -458,6 +491,7 @@ mod tests {
             proxy_url: None,
             proxy_username: None,
             proxy_password: None,
+            require_credential_proxy: false,
             disabled: false,
             kiro_api_key: None,
             endpoint: None,
@@ -489,6 +523,7 @@ mod tests {
             proxy_url: None,
             proxy_username: None,
             proxy_password: None,
+            require_credential_proxy: false,
             disabled: false,
             kiro_api_key: None,
             endpoint: None,
@@ -603,6 +638,7 @@ mod tests {
             proxy_url: None,
             proxy_username: None,
             proxy_password: None,
+            require_credential_proxy: false,
             disabled: false,
             kiro_api_key: None,
             endpoint: None,
@@ -869,5 +905,36 @@ mod tests {
         let creds = KiroCredentials::default();
         let result = creds.effective_proxy(None);
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_required_credential_proxy_rejects_global_fallback() {
+        let global = ProxyConfig::new("http://global:8080");
+        let mut creds = KiroCredentials::default();
+        creds.require_credential_proxy = true;
+
+        let err = creds.resolve_proxy(Some(&global)).unwrap_err().to_string();
+        assert!(err.contains("未配置 proxyUrl"));
+    }
+
+    #[test]
+    fn test_required_credential_proxy_rejects_direct() {
+        let mut creds = KiroCredentials::default();
+        creds.require_credential_proxy = true;
+        creds.proxy_url = Some("direct".to_string());
+
+        let err = creds.resolve_proxy(None).unwrap_err().to_string();
+        assert!(err.contains("proxyUrl=direct"));
+    }
+
+    #[test]
+    fn test_required_credential_proxy_accepts_credential_proxy() {
+        let global = ProxyConfig::new("http://global:8080");
+        let mut creds = KiroCredentials::default();
+        creds.require_credential_proxy = true;
+        creds.proxy_url = Some("socks5://cred:1080".to_string());
+
+        let result = creds.resolve_proxy(Some(&global)).unwrap();
+        assert_eq!(result, Some(ProxyConfig::new("socks5://cred:1080")));
     }
 }

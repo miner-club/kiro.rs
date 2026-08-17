@@ -64,6 +64,14 @@ pub struct CredentialStatusItem {
     /// 代理 URL（用于前端展示）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proxy_url: Option<String>,
+    /// 是否要求必须使用凭据级代理
+    pub require_credential_proxy: bool,
+    pub has_machine_id: bool,
+    pub has_client_id: bool,
+    pub has_client_secret: bool,
+    pub has_region: bool,
+    pub has_auth_region: bool,
+    pub has_api_region: bool,
     /// Token 刷新连续失败次数
     pub refresh_failure_count: u32,
     /// 禁用原因
@@ -144,6 +152,10 @@ pub struct AddCredentialRequest {
 
     /// 凭据级代理认证密码（可选）
     pub proxy_password: Option<String>,
+
+    /// 要求该凭据必须使用凭据级代理，不允许回落全局代理或直连
+    #[serde(default)]
+    pub require_credential_proxy: bool,
 
     /// Kiro API Key（API Key 凭据必填，格式: ksk_xxxxxxxx）
     /// 设置后直接作为 Bearer Token 使用，无需 refreshToken

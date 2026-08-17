@@ -355,6 +355,19 @@ fn create_ping_sse() -> Bytes {
     Bytes::from("event: ping\ndata: {\"type\": \"ping\"}\n\n")
 }
 
+fn create_stream_error_events(message: &str) -> Vec<SseEvent> {
+    vec![SseEvent::new(
+        "error",
+        serde_json::json!({
+            "type": "error",
+            "error": {
+                "type": "api_error",
+                "message": message,
+            }
+        }),
+    )]
+}
+
 /// 创建 SSE 事件流
 fn create_sse_stream(
     response: reqwest::Response,
@@ -414,9 +427,11 @@ fn create_sse_stream(
                         }
                         Some(Err(e)) => {
                             tracing::error!("读取响应流失败: {}", e);
-                            // 发送最终事件并结束
-                            let final_events = ctx.generate_final_events();
-                            let bytes: Vec<Result<Bytes, Infallible>> = final_events
+                            let error_events = create_stream_error_events(&format!(
+                                "上游响应流读取失败，响应未完整完成: {}",
+                                e
+                            ));
+                            let bytes: Vec<Result<Bytes, Infallible>> = error_events
                                 .into_iter()
                                 .map(|e| Ok(Bytes::from(e.to_sse_string())))
                                 .collect();
@@ -948,9 +963,11 @@ fn create_buffered_sse_stream(
                             }
                             Some(Err(e)) => {
                                 tracing::error!("读取响应流失败: {}", e);
-                                // 发生错误，完成处理并返回所有事件
-                                let all_events = ctx.finish_and_get_all_events();
-                                let bytes: Vec<Result<Bytes, Infallible>> = all_events
+                                let error_events = create_stream_error_events(&format!(
+                                    "上游响应流读取失败，响应未完整完成: {}",
+                                    e
+                                ));
+                                let bytes: Vec<Result<Bytes, Infallible>> = error_events
                                     .into_iter()
                                     .map(|e| Ok(Bytes::from(e.to_sse_string())))
                                     .collect();
@@ -972,4 +989,18 @@ fn create_buffered_sse_stream(
         },
     )
     .flatten()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::create_stream_error_events;
+
+    #[test]
+    fn stream_error_event_does_not_emit_message_stop() {
+        let events = create_stream_error_events("stream read failed");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event, "error");
+        assert_eq!(events[0].data["type"], "error");
+        assert_eq!(events[0].data["error"]["type"], "api_error");
+    }
 }

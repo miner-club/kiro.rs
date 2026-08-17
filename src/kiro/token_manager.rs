@@ -727,6 +727,14 @@ pub struct CredentialEntrySnapshot {
     /// 代理 URL（用于前端展示）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proxy_url: Option<String>,
+    /// 是否要求必须使用凭据级代理
+    pub require_credential_proxy: bool,
+    pub has_machine_id: bool,
+    pub has_client_id: bool,
+    pub has_client_secret: bool,
+    pub has_region: bool,
+    pub has_auth_region: bool,
+    pub has_api_region: bool,
     /// Token 刷新连续失败次数
     pub refresh_failure_count: u32,
     /// 禁用原因
@@ -1301,7 +1309,7 @@ impl MultiTokenManager {
 
             if is_token_expired(&current_creds) || is_token_expiring_soon(&current_creds) {
                 // 确实需要刷新
-                let effective_proxy = current_creds.effective_proxy(self.proxy.as_ref());
+                let effective_proxy = current_creds.resolve_proxy(self.proxy.as_ref())?;
                 let new_creds =
                     refresh_token(&current_creds, &self.config, effective_proxy.as_ref()).await?;
 
@@ -2057,6 +2065,13 @@ impl MultiTokenManager {
                     metering_started_at: e.metering_started_at.clone(),
                     has_proxy: e.credentials.proxy_url.is_some(),
                     proxy_url: e.credentials.proxy_url.clone(),
+                    require_credential_proxy: e.credentials.require_credential_proxy,
+                    has_machine_id: e.credentials.machine_id.is_some(),
+                    has_client_id: e.credentials.client_id.is_some(),
+                    has_client_secret: e.credentials.client_secret.is_some(),
+                    has_region: e.credentials.region.is_some(),
+                    has_auth_region: e.credentials.auth_region.is_some(),
+                    has_api_region: e.credentials.api_region.is_some(),
                     refresh_failure_count: e.refresh_failure_count,
                     disabled_reason: e
                         .disabled_reason
@@ -2179,7 +2194,7 @@ impl MultiTokenManager {
                 };
 
                 if is_token_expired(&current_creds) || is_token_expiring_soon(&current_creds) {
-                    let effective_proxy = current_creds.effective_proxy(self.proxy.as_ref());
+                    let effective_proxy = current_creds.resolve_proxy(self.proxy.as_ref())?;
                     let new_creds =
                         refresh_token(&current_creds, &self.config, effective_proxy.as_ref())
                             .await?;
@@ -2217,7 +2232,7 @@ impl MultiTokenManager {
                 .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?
         };
 
-        let effective_proxy = credentials.effective_proxy(self.proxy.as_ref());
+        let effective_proxy = credentials.resolve_proxy(self.proxy.as_ref())?;
         let usage_limits =
             get_usage_limits(&credentials, &self.config, &token, effective_proxy.as_ref()).await?;
 
@@ -2281,6 +2296,10 @@ impl MultiTokenManager {
             validate_refresh_token(&new_cred)?;
         }
 
+        if new_cred.require_credential_proxy {
+            new_cred.resolve_proxy(self.proxy.as_ref())?;
+        }
+
         // 2. 基于哈希检测重复
         if new_cred.is_api_key_credential() {
             let new_api_key = new_cred
@@ -2330,7 +2349,7 @@ impl MultiTokenManager {
         let mut validated_cred = if new_cred.is_api_key_credential() {
             new_cred.clone()
         } else {
-            let effective_proxy = new_cred.effective_proxy(self.proxy.as_ref());
+            let effective_proxy = new_cred.resolve_proxy(self.proxy.as_ref())?;
             refresh_token(&new_cred, &self.config, effective_proxy.as_ref()).await?
         };
 
@@ -2360,6 +2379,7 @@ impl MultiTokenManager {
         validated_cred.proxy_url = new_cred.proxy_url;
         validated_cred.proxy_username = new_cred.proxy_username;
         validated_cred.proxy_password = new_cred.proxy_password;
+        validated_cred.require_credential_proxy = new_cred.require_credential_proxy;
         validated_cred.kiro_api_key = new_cred.kiro_api_key;
 
         {
@@ -2476,7 +2496,7 @@ impl MultiTokenManager {
         let _guard = self.refresh_lock.lock().await;
 
         // 无条件调用 refresh_token
-        let effective_proxy = credentials.effective_proxy(self.proxy.as_ref());
+        let effective_proxy = credentials.resolve_proxy(self.proxy.as_ref())?;
         let new_creds = refresh_token(&credentials, &self.config, effective_proxy.as_ref()).await?;
 
         // 更新 entries 中对应凭据
@@ -2812,6 +2832,25 @@ mod tests {
                 .unwrap()
                 .to_string()
                 .contains("缺少 kiroApiKey")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_add_credential_required_proxy_rejects_missing_proxy() {
+        let config = Config::default();
+        let manager = MultiTokenManager::new(config, vec![], None, None, false).unwrap();
+
+        let mut cred = api_key_credential(0, "ksk_test_key_123");
+        cred.require_credential_proxy = true;
+
+        let result = manager.add_credential(cred).await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("未配置 proxyUrl")
         );
     }
 

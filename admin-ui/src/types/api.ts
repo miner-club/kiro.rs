@@ -27,8 +27,18 @@ export interface CredentialStatusItem {
   lastUsedAt: string | null
   hasProxy: boolean
   proxyUrl?: string
+  requireCredentialProxy: boolean
+  hasMachineId: boolean
+  hasClientId: boolean
+  hasClientSecret: boolean
+  hasRegion: boolean
+  hasAuthRegion: boolean
+  hasApiRegion: boolean
   refreshFailureCount: number
   disabledReason?: string
+  disabledUntil?: string
+  suspendStreak: number
+  probation: boolean
   endpoint: string
 }
 
@@ -78,12 +88,14 @@ export interface AddCredentialRequest {
   clientId?: string
   clientSecret?: string
   priority?: number
+  region?: string
   authRegion?: string
   apiRegion?: string
   machineId?: string
   proxyUrl?: string
   proxyUsername?: string
   proxyPassword?: string
+  requireCredentialProxy?: boolean
   kiroApiKey?: string
   endpoint?: string
 }

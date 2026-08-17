@@ -132,7 +132,7 @@ impl KiroProvider {
 
     /// 根据凭据的代理配置获取（或创建并缓存）对应的 reqwest::Client
     fn client_for(&self, credentials: &KiroCredentials) -> anyhow::Result<Client> {
-        let effective = credentials.effective_proxy(self.global_proxy.as_ref());
+        let effective = credentials.resolve_proxy(self.global_proxy.as_ref())?;
         let mut cache = self.client_cache.lock();
         if let Some(client) = cache.get(&effective) {
             return Ok(client.clone());
@@ -216,8 +216,14 @@ impl KiroProvider {
             let url = endpoint.mcp_url(&rctx);
             let body = endpoint.transform_mcp_body(request_body, &rctx);
 
-            let base = self
-                .client_for(&ctx.credentials)?
+            let client = match self.client_for(&ctx.credentials) {
+                Ok(client) => client,
+                Err(e) => {
+                    self.token_manager.report_request_finished(ctx.id);
+                    anyhow::bail!("MCP 请求失败（凭据 #{} 代理配置不可用）: {}", ctx.id, e);
+                }
+            };
+            let base = client
                 .post(&url)
                 .body(body)
                 .header("content-type", "application/json")
@@ -333,6 +339,22 @@ impl KiroProvider {
                 continue;
             }
 
+            if Self::body_indicates_model_temporarily_unavailable(&body) {
+                self.token_manager.report_request_finished(ctx.id);
+                tracing::warn!(
+                    "MCP 请求失败（模型临时不可用/上游过载，同凭据退避，不切换凭据，尝试 {}/{}）: {} {}",
+                    attempt + 1,
+                    max_retries,
+                    status,
+                    body
+                );
+                last_error = Some(anyhow::anyhow!("MCP 请求失败: {} {}", status, body));
+                if attempt + 1 < max_retries {
+                    sleep(Self::retry_delay(attempt)).await;
+                }
+                continue;
+            }
+
             // 瞬态错误
             if matches!(status.as_u16(), 408 | 429) || status.is_server_error() {
                 self.token_manager.report_request_finished(ctx.id);
@@ -431,8 +453,19 @@ impl KiroProvider {
             let url = endpoint.api_url(&rctx);
             let body = endpoint.transform_api_body(request_body, &rctx);
 
-            let base = self
-                .client_for(&ctx.credentials)?
+            let client = match self.client_for(&ctx.credentials) {
+                Ok(client) => client,
+                Err(e) => {
+                    self.token_manager.report_request_finished(ctx.id);
+                    anyhow::bail!(
+                        "{} API 请求失败（凭据 #{} 代理配置不可用）: {}",
+                        api_type,
+                        ctx.id,
+                        e
+                    );
+                }
+            };
+            let base = client
                 .post(&url)
                 .body(body)
                 .header("content-type", "application/json")
@@ -595,6 +628,27 @@ impl KiroProvider {
                 continue;
             }
 
+            if Self::body_indicates_model_temporarily_unavailable(&body) {
+                self.token_manager.report_request_finished(ctx.id);
+                tracing::warn!(
+                    "API 请求失败（模型临时不可用/上游过载，同凭据退避，不切换凭据，尝试 {}/{}）: {} {}",
+                    attempt + 1,
+                    max_retries,
+                    status,
+                    body
+                );
+                last_error = Some(anyhow::anyhow!(
+                    "{} API 请求失败: {} {}",
+                    api_type,
+                    status,
+                    body
+                ));
+                if attempt + 1 < max_retries {
+                    sleep(Self::retry_delay(attempt)).await;
+                }
+                continue;
+            }
+
             // 429/408/5xx - 瞬态上游错误：重试但不禁用或切换凭据
             // （避免 429 high traffic / 502 high load 等瞬态错误把所有凭据锁死）
             if matches!(status.as_u16(), 408 | 429) || status.is_server_error() {
@@ -680,6 +734,14 @@ impl KiroProvider {
             .map(str::to_string)
     }
 
+    fn body_indicates_model_temporarily_unavailable(body: &str) -> bool {
+        let lower = body.to_ascii_lowercase();
+        lower.contains("model_temporarily_unavailable")
+            || lower.contains("server_is_overloaded")
+            || lower.contains("servers are currently overloaded")
+            || lower.contains("selected model is at capacity")
+    }
+
     fn retry_delay(attempt: usize) -> Duration {
         // 指数退避 + 少量抖动，避免上游抖动时放大故障
         const BASE_MS: u64 = 200;
@@ -727,6 +789,22 @@ mod tests {
     #[test]
     fn test_extract_conversation_id_missing_is_none() {
         assert!(KiroProvider::extract_conversation_id_from_request("{}").is_none());
+    }
+
+    #[test]
+    fn model_temporarily_unavailable_body_is_no_switch_error() {
+        assert!(KiroProvider::body_indicates_model_temporarily_unavailable(
+            r#"{"reason":"MODEL_TEMPORARILY_UNAVAILABLE"}"#
+        ));
+        assert!(KiroProvider::body_indicates_model_temporarily_unavailable(
+            "Our servers are currently overloaded. Please try again later."
+        ));
+        assert!(KiroProvider::body_indicates_model_temporarily_unavailable(
+            "Selected model is at capacity. Please try a different model."
+        ));
+        assert!(!KiroProvider::body_indicates_model_temporarily_unavailable(
+            "The bearer token included in the request is invalid."
+        ));
     }
 
     #[test]

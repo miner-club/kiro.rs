@@ -332,11 +332,28 @@ export function CredentialCard({
               <div className="col-span-2">
                 <span className="text-muted-foreground">代理：</span>
                 <span className="font-medium">{credential.proxyUrl}</span>
+                {credential.requireCredentialProxy && (
+                  <Badge variant="secondary" className="ml-2">强制凭据代理</Badge>
+                )}
               </div>
             )}
-            {credential.hasProfileArn && (
+            {credential.requireCredentialProxy && !credential.hasProxy && (
               <div className="col-span-2">
-                <Badge variant="secondary">有 Profile ARN</Badge>
+                <Badge variant="destructive">缺少必需凭据代理</Badge>
+              </div>
+            )}
+            {(credential.hasProfileArn || credential.hasMachineId || credential.hasClientId || credential.hasClientSecret || credential.hasRegion || credential.hasAuthRegion || credential.hasApiRegion) && (
+              <div className="col-span-2">
+                <span className="text-muted-foreground mr-1">元数据：</span>
+                <div className="inline-flex flex-wrap gap-1">
+                  {credential.hasProfileArn && <Badge variant="secondary">Profile ARN</Badge>}
+                  {credential.hasMachineId && <Badge variant="secondary">Machine ID</Badge>}
+                  {credential.hasClientId && <Badge variant="secondary">Client ID</Badge>}
+                  {credential.hasClientSecret && <Badge variant="secondary">Client Secret</Badge>}
+                  {credential.hasRegion && <Badge variant="secondary">Region</Badge>}
+                  {credential.hasAuthRegion && <Badge variant="secondary">Auth Region</Badge>}
+                  {credential.hasApiRegion && <Badge variant="secondary">API Region</Badge>}
+                </div>
               </div>
             )}
           </div>

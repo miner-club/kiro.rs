@@ -9,6 +9,7 @@ import {
 } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Checkbox } from '@/components/ui/checkbox'
 import { useAddCredential } from '@/hooks/use-credentials'
 import { extractErrorMessage } from '@/lib/utils'
 
@@ -23,6 +24,7 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
   const [refreshToken, setRefreshToken] = useState('')
   const [kiroApiKey, setKiroApiKey] = useState('')
   const [authMethod, setAuthMethod] = useState<AuthMethod>('social')
+  const [region, setRegion] = useState('')
   const [authRegion, setAuthRegion] = useState('')
   const [apiRegion, setApiRegion] = useState('')
   const [clientId, setClientId] = useState('')
@@ -32,6 +34,7 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
   const [proxyUrl, setProxyUrl] = useState('')
   const [proxyUsername, setProxyUsername] = useState('')
   const [proxyPassword, setProxyPassword] = useState('')
+  const [requireCredentialProxy, setRequireCredentialProxy] = useState(false)
   const [endpoint, setEndpoint] = useState('')
 
   const { mutate, isPending } = useAddCredential()
@@ -40,6 +43,7 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
     setRefreshToken('')
     setKiroApiKey('')
     setAuthMethod('social')
+    setRegion('')
     setAuthRegion('')
     setApiRegion('')
     setClientId('')
@@ -49,6 +53,7 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
     setProxyUrl('')
     setProxyUsername('')
     setProxyPassword('')
+    setRequireCredentialProxy(false)
     setEndpoint('')
   }
 
@@ -80,6 +85,7 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
         authMethod,
         refreshToken: isApiKey ? undefined : refreshToken.trim(),
         kiroApiKey: isApiKey ? kiroApiKey.trim() : undefined,
+        region: region.trim() || undefined,
         authRegion: authRegion.trim() || undefined,
         apiRegion: apiRegion.trim() || undefined,
         clientId: isApiKey ? undefined : clientId.trim() || undefined,
@@ -89,6 +95,7 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
         proxyUrl: proxyUrl.trim() || undefined,
         proxyUsername: proxyUsername.trim() || undefined,
         proxyPassword: proxyPassword.trim() || undefined,
+        requireCredentialProxy,
         endpoint: endpoint.trim() || undefined,
       },
       {
@@ -168,7 +175,16 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
             {/* Region 配置 */}
             <div className="space-y-2">
               <label className="text-sm font-medium">Region 配置</label>
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-3 gap-2">
+                <div>
+                  <Input
+                    id="region"
+                    placeholder="Region"
+                    value={region}
+                    onChange={(e) => setRegion(e.target.value)}
+                    disabled={isPending}
+                  />
+                </div>
                 <div>
                   <Input
                     id="authRegion"
@@ -189,7 +205,7 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
                 </div>
               </div>
               <p className="text-xs text-muted-foreground">
-                均可留空使用全局配置。Auth Region 用于 Token 刷新，API Region 用于 API 请求
+                均可留空使用全局配置。Region 是凭据默认区域，Auth Region 用于 Token 刷新，API Region 用于 API 请求
               </p>
             </div>
 
@@ -307,6 +323,14 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
               <p className="text-xs text-muted-foreground">
                 留空使用全局代理。输入 "direct" 可显式不使用代理
               </p>
+              <label className="flex items-center gap-2 text-sm">
+                <Checkbox
+                  checked={requireCredentialProxy}
+                  onCheckedChange={(checked) => setRequireCredentialProxy(checked === true)}
+                  disabled={isPending}
+                />
+                必须使用凭据级代理，不允许回落全局代理或直连
+              </label>
             </div>
           </div>
 

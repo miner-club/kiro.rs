@@ -30,6 +30,7 @@ interface CredentialInput {
   kiroApiKey?: string
   authMethod?: string
   endpoint?: string
+  requireCredentialProxy?: boolean
 }
 
 interface VerificationResult {
@@ -230,10 +231,12 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
               authMethod: 'api_key',
               kiroApiKey: cred.kiroApiKey?.trim(),
               priority: cred.priority || 0,
+              region: cred.region?.trim() || undefined,
               authRegion: cred.authRegion?.trim() || cred.region?.trim() || undefined,
               apiRegion: cred.apiRegion?.trim() || undefined,
               machineId: cred.machineId?.trim() || undefined,
               endpoint: cred.endpoint?.trim() || undefined,
+              requireCredentialProxy: cred.requireCredentialProxy === true,
             })
 
             addedCredId = addedCred.credentialId
@@ -276,6 +279,7 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
           const addedCred = await addCredential({
             refreshToken: token,
             authMethod,
+            region: cred.region?.trim() || undefined,
             authRegion: cred.authRegion?.trim() || cred.region?.trim() || undefined,
             apiRegion: cred.apiRegion?.trim() || undefined,
             clientId,
@@ -283,6 +287,7 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
             priority: cred.priority || 0,
             machineId: cred.machineId?.trim() || undefined,
             endpoint: cred.endpoint?.trim() || undefined,
+            requireCredentialProxy: cred.requireCredentialProxy === true,
           })
 
           addedCredId = addedCred.credentialId
