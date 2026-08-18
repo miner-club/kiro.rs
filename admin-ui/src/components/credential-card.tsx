@@ -167,6 +167,9 @@ export function CredentialCard({
                 {credential.disabled && credential.disabledReason && (
                   <Badge variant="outline">{credential.disabledReason}</Badge>
                 )}
+                {credential.quotaExhaustionReason && (
+                  <Badge variant="warning">{credential.quotaExhaustionReason}</Badge>
+                )}
                 {credential.authMethod && (
                   <Badge variant="secondary">
                     {credential.authMethod === 'api_key' ? 'API Key' :

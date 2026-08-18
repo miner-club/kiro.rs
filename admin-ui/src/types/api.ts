@@ -2,8 +2,25 @@
 export interface CredentialsStatusResponse {
   total: number
   available: number
+  disabledCount: number
   currentId: number
+  allDisabled: boolean
+  unavailableReason?: string
+  disabledReasonCounts: Record<string, number>
+  monthlyRequestCountDisabled: number
   credentials: CredentialStatusItem[]
+}
+
+export interface AdminHealthResponse {
+  status: 'ok' | 'degraded' | 'unavailable'
+  total: number
+  available: number
+  disabledCount: number
+  currentId: number
+  allDisabled: boolean
+  unavailableReason?: string
+  disabledReasonCounts: Record<string, number>
+  monthlyRequestCountDisabled: number
 }
 
 // 单个凭据状态
@@ -29,6 +46,7 @@ export interface CredentialStatusItem {
   proxyUrl?: string
   refreshFailureCount: number
   disabledReason?: string
+  quotaExhaustionReason?: string
   endpoint: string
 }
 

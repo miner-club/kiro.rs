@@ -8,7 +8,7 @@ use axum::{
 use super::{
     handlers::{
         add_credential, delete_credential, force_refresh_token, get_all_credentials,
-        get_credential_balance, get_load_balancing_mode, reset_failure_count,
+        get_credential_balance, get_health, get_load_balancing_mode, reset_failure_count,
         set_credential_disabled, set_credential_priority, set_load_balancing_mode,
     },
     middleware::{AdminState, admin_auth_middleware},
@@ -18,6 +18,7 @@ use super::{
 ///
 /// # 端点
 /// - `GET /credentials` - 获取所有凭据状态
+/// - `GET /health` - 获取凭据池健康状态
 /// - `POST /credentials` - 添加新凭据
 /// - `DELETE /credentials/:id` - 删除凭据
 /// - `POST /credentials/:id/disabled` - 设置凭据禁用状态
@@ -34,6 +35,7 @@ use super::{
 /// - `Authorization: Bearer <token>` header
 pub fn create_admin_router(state: AdminState) -> Router {
     Router::new()
+        .route("/health", get(get_health))
         .route(
             "/credentials",
             get(get_all_credentials).post(add_credential),
