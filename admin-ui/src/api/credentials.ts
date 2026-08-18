@@ -1,6 +1,7 @@
 import axios from 'axios'
 import { storage } from '@/lib/storage'
 import type {
+  AdminHealthResponse,
   CredentialsStatusResponse,
   BalanceResponse,
   SuccessResponse,
@@ -30,6 +31,12 @@ api.interceptors.request.use((config) => {
 // 获取所有凭据状态
 export async function getCredentials(): Promise<CredentialsStatusResponse> {
   const { data } = await api.get<CredentialsStatusResponse>('/credentials')
+  return data
+}
+
+// 获取凭据池健康状态
+export async function getAdminHealth(): Promise<AdminHealthResponse> {
+  const { data } = await api.get<AdminHealthResponse>('/health')
   return data
 }
 

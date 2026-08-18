@@ -21,6 +21,13 @@ pub async fn get_all_credentials(State(state): State<AdminState>) -> impl IntoRe
     Json(response)
 }
 
+/// GET /api/admin/health
+/// 获取凭据池健康状态
+pub async fn get_health(State(state): State<AdminState>) -> impl IntoResponse {
+    let response = state.service.get_health();
+    Json(response)
+}
+
 /// POST /api/admin/credentials/:id/disabled
 /// 设置凭据禁用状态
 pub async fn set_credential_disabled(

@@ -643,7 +643,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
       {/* 主内容 */}
       <main className="container mx-auto px-4 md:px-8 py-6">
         {/* 统计卡片 */}
-        <div className="grid gap-4 md:grid-cols-3 mb-6">
+        <div className="grid gap-4 md:grid-cols-4 mb-6">
           <Card>
             <CardHeader className="pb-2">
               <CardTitle className="text-sm font-medium text-muted-foreground">
@@ -667,14 +667,36 @@ export function Dashboard({ onLogout }: DashboardProps) {
           <Card>
             <CardHeader className="pb-2">
               <CardTitle className="text-sm font-medium text-muted-foreground">
+                运行时禁用
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className={`text-2xl font-bold ${data?.allDisabled ? 'text-red-600' : 'text-yellow-600'}`}>
+                {data?.disabledCount || 0}
+              </div>
+              {data?.monthlyRequestCountDisabled ? (
+                <div className="mt-1 text-xs text-muted-foreground">
+                  MONTHLY_REQUEST_COUNT: {data.monthlyRequestCountDisabled}
+                </div>
+              ) : null}
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-medium text-muted-foreground">
                 当前活跃
               </CardTitle>
             </CardHeader>
             <CardContent>
               <div className="text-2xl font-bold flex items-center gap-2">
                 #{data?.currentId || '-'}
-                <Badge variant="success">活跃</Badge>
+                <Badge variant={data?.allDisabled ? 'destructive' : 'success'}>
+                  {data?.allDisabled ? '不可用' : '活跃'}
+                </Badge>
               </div>
+              {data?.unavailableReason ? (
+                <div className="mt-1 text-xs text-muted-foreground">{data.unavailableReason}</div>
+              ) : null}
             </CardContent>
           </Card>
         </div>

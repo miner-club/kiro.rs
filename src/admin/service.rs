@@ -1,6 +1,6 @@
 //! Admin API 业务逻辑服务
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -13,8 +13,9 @@ use crate::kiro::token_manager::MultiTokenManager;
 
 use super::error::AdminServiceError;
 use super::types::{
-    AddCredentialRequest, AddCredentialResponse, BalanceResponse, CredentialStatusItem,
-    CredentialsStatusResponse, LoadBalancingModeResponse, SetLoadBalancingModeRequest,
+    AddCredentialRequest, AddCredentialResponse, AdminHealthResponse, BalanceResponse,
+    CredentialStatusItem, CredentialsStatusResponse, LoadBalancingModeResponse,
+    SetLoadBalancingModeRequest,
 };
 
 /// 余额缓存过期时间（秒），5 分钟
@@ -63,6 +64,7 @@ impl AdminService {
     pub fn get_all_credentials(&self) -> CredentialsStatusResponse {
         let snapshot = self.token_manager.snapshot();
         let default_endpoint = self.token_manager.config().default_endpoint.clone();
+        let status_summary = CredentialStatusSummary::from_entries(&snapshot.entries);
 
         let mut credentials: Vec<CredentialStatusItem> = snapshot
             .entries
@@ -88,6 +90,7 @@ impl AdminService {
                 has_proxy: entry.has_proxy,
                 proxy_url: entry.proxy_url,
                 refresh_failure_count: entry.refresh_failure_count,
+                quota_exhaustion_reason: quota_exhaustion_reason(&entry.disabled_reason),
                 disabled_reason: entry.disabled_reason,
                 disabled_until: entry.disabled_until,
                 suspend_streak: entry.suspend_streak,
@@ -102,8 +105,31 @@ impl AdminService {
         CredentialsStatusResponse {
             total: snapshot.total,
             available: snapshot.available,
+            disabled_count: status_summary.disabled_count,
             current_id: snapshot.current_id,
+            all_disabled: status_summary.all_disabled,
+            unavailable_reason: status_summary.unavailable_reason,
+            disabled_reason_counts: status_summary.disabled_reason_counts,
+            monthly_request_count_disabled: status_summary.monthly_request_count_disabled,
             credentials,
+        }
+    }
+
+    /// 获取 Admin 健康状态
+    pub fn get_health(&self) -> AdminHealthResponse {
+        let snapshot = self.token_manager.snapshot();
+        let status_summary = CredentialStatusSummary::from_entries(&snapshot.entries);
+
+        AdminHealthResponse {
+            status: status_summary.status,
+            total: snapshot.total,
+            available: snapshot.available,
+            disabled_count: status_summary.disabled_count,
+            current_id: snapshot.current_id,
+            all_disabled: status_summary.all_disabled,
+            unavailable_reason: status_summary.unavailable_reason,
+            disabled_reason_counts: status_summary.disabled_reason_counts,
+            monthly_request_count_disabled: status_summary.monthly_request_count_disabled,
         }
     }
 
@@ -473,5 +499,153 @@ impl AdminService {
         } else {
             AdminServiceError::InternalError(msg)
         }
+    }
+}
+
+struct CredentialStatusSummary {
+    status: String,
+    disabled_count: usize,
+    all_disabled: bool,
+    unavailable_reason: Option<String>,
+    disabled_reason_counts: BTreeMap<String, usize>,
+    monthly_request_count_disabled: usize,
+}
+
+impl CredentialStatusSummary {
+    fn from_entries(entries: &[crate::kiro::token_manager::CredentialEntrySnapshot]) -> Self {
+        let total = entries.len();
+        let disabled_count = entries.iter().filter(|entry| entry.disabled).count();
+        let available = total.saturating_sub(disabled_count);
+        let all_disabled = total > 0 && available == 0;
+        let mut disabled_reason_counts = BTreeMap::new();
+
+        for reason in entries
+            .iter()
+            .filter(|entry| entry.disabled)
+            .filter_map(|entry| entry.disabled_reason.as_deref())
+        {
+            *disabled_reason_counts
+                .entry(reason.to_string())
+                .or_insert(0) += 1;
+        }
+
+        let monthly_request_count_disabled =
+            *disabled_reason_counts.get("QuotaExceeded").unwrap_or(&0);
+        let status = if total == 0 || all_disabled {
+            "unavailable"
+        } else if disabled_count > 0 {
+            "degraded"
+        } else {
+            "ok"
+        }
+        .to_string();
+
+        let unavailable_reason = if total == 0 {
+            Some("NoCredentials".to_string())
+        } else if all_disabled && monthly_request_count_disabled == total {
+            Some("MONTHLY_REQUEST_COUNT".to_string())
+        } else if all_disabled {
+            Some("AllCredentialsDisabled".to_string())
+        } else {
+            None
+        };
+
+        Self {
+            status,
+            disabled_count,
+            all_disabled,
+            unavailable_reason,
+            disabled_reason_counts,
+            monthly_request_count_disabled,
+        }
+    }
+}
+
+fn quota_exhaustion_reason(disabled_reason: &Option<String>) -> Option<String> {
+    match disabled_reason.as_deref() {
+        Some("QuotaExceeded") => Some("MONTHLY_REQUEST_COUNT".to_string()),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kiro::token_manager::CredentialEntrySnapshot;
+
+    fn snapshot(id: u64, disabled: bool, reason: Option<&str>) -> CredentialEntrySnapshot {
+        CredentialEntrySnapshot {
+            id,
+            priority: id as u32,
+            disabled,
+            failure_count: 0,
+            auth_method: None,
+            has_profile_arn: false,
+            expires_at: None,
+            refresh_token_hash: None,
+            api_key_hash: None,
+            masked_api_key: None,
+            email: None,
+            success_count: 0,
+            last_used_at: None,
+            metered_credits: 0.0,
+            metered_request_count: 0,
+            metering_started_at: None,
+            has_proxy: false,
+            proxy_url: None,
+            refresh_failure_count: 0,
+            disabled_reason: reason.map(str::to_string),
+            disabled_until: None,
+            suspend_streak: 0,
+            probation: false,
+            endpoint: None,
+        }
+    }
+
+    #[test]
+    fn status_summary_reports_monthly_request_count_when_all_quota_exhausted() {
+        let entries = vec![
+            snapshot(1013, true, Some("QuotaExceeded")),
+            snapshot(1020, true, Some("QuotaExceeded")),
+        ];
+
+        let summary = CredentialStatusSummary::from_entries(&entries);
+
+        assert_eq!(summary.status, "unavailable");
+        assert!(summary.all_disabled);
+        assert_eq!(
+            summary.unavailable_reason.as_deref(),
+            Some("MONTHLY_REQUEST_COUNT")
+        );
+        assert_eq!(summary.monthly_request_count_disabled, 2);
+        assert_eq!(
+            summary.disabled_reason_counts.get("QuotaExceeded").copied(),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn status_summary_is_degraded_when_some_credentials_remain_available() {
+        let entries = vec![
+            snapshot(1013, false, None),
+            snapshot(1020, true, Some("QuotaExceeded")),
+        ];
+
+        let summary = CredentialStatusSummary::from_entries(&entries);
+
+        assert_eq!(summary.status, "degraded");
+        assert!(!summary.all_disabled);
+        assert_eq!(summary.unavailable_reason, None);
+        assert_eq!(summary.disabled_count, 1);
+        assert_eq!(summary.monthly_request_count_disabled, 1);
+    }
+
+    #[test]
+    fn quota_exhaustion_reason_maps_quota_exceeded_to_kiro_reason() {
+        assert_eq!(
+            quota_exhaustion_reason(&Some("QuotaExceeded".to_string())).as_deref(),
+            Some("MONTHLY_REQUEST_COUNT")
+        );
+        assert_eq!(quota_exhaustion_reason(&Some("Manual".to_string())), None);
     }
 }

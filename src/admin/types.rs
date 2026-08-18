@@ -1,6 +1,7 @@
 //! Admin API 类型定义
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Default, Deserialize)]
 pub struct BalanceQuery {
@@ -18,10 +19,46 @@ pub struct CredentialsStatusResponse {
     pub total: usize,
     /// 可用凭据数量（未禁用）
     pub available: usize,
+    /// 禁用凭据数量
+    pub disabled_count: usize,
     /// 当前活跃凭据 ID
     pub current_id: u64,
+    /// 是否已无可用凭据
+    pub all_disabled: bool,
+    /// 不可用原因汇总
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
+    /// 禁用原因计数
+    pub disabled_reason_counts: BTreeMap<String, usize>,
+    /// 因 Kiro MONTHLY_REQUEST_COUNT 用尽而禁用的凭据数量
+    pub monthly_request_count_disabled: usize,
     /// 各凭据状态列表
     pub credentials: Vec<CredentialStatusItem>,
+}
+
+/// Admin 健康状态响应
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminHealthResponse {
+    /// ok/degraded/unavailable
+    pub status: String,
+    /// 凭据总数
+    pub total: usize,
+    /// 可用凭据数量（未禁用）
+    pub available: usize,
+    /// 禁用凭据数量
+    pub disabled_count: usize,
+    /// 当前活跃凭据 ID
+    pub current_id: u64,
+    /// 是否已无可用凭据
+    pub all_disabled: bool,
+    /// 不可用原因汇总
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
+    /// 禁用原因计数
+    pub disabled_reason_counts: BTreeMap<String, usize>,
+    /// 因 Kiro MONTHLY_REQUEST_COUNT 用尽而禁用的凭据数量
+    pub monthly_request_count_disabled: usize,
 }
 
 /// 单个凭据的状态信息
@@ -69,6 +106,9 @@ pub struct CredentialStatusItem {
     /// 禁用原因
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disabled_reason: Option<String>,
+    /// 上游额度原因（当前 QuotaExceeded 对应 Kiro MONTHLY_REQUEST_COUNT）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quota_exhaustion_reason: Option<String>,
     /// 临时封禁冷却到期时间
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disabled_until: Option<String>,
