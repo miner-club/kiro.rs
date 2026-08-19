@@ -30,6 +30,9 @@ const MAX_RETRIES_PER_CREDENTIAL: usize = 3;
 const MAX_TOTAL_RETRIES: usize = 9;
 
 /// API 调用结果：响应 + 实际使用的凭据 ID
+///
+/// 凭据 ID 用于缓存指纹追踪——模拟的 prompt cache 按凭据隔离，
+/// 调用方需要知道这次请求最终落在哪个凭据上。
 pub struct ApiCallResult {
     pub response: reqwest::Response,
     pub credential_id: u64,
@@ -157,6 +160,7 @@ impl KiroProvider {
     /// 发送非流式 API 请求
     ///
     /// 支持多凭据故障转移（见 [`Self::call_api_with_retry`]）
+    /// 返回响应及实际使用的凭据 ID（用于按凭据维护缓存指纹表）
     pub async fn call_api(&self, request_body: &str) -> anyhow::Result<ApiCallResult> {
         self.call_api_with_retry(request_body, false).await
     }

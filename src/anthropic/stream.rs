@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use serde_json::json;
 use uuid::Uuid;
 
+use super::cache_tracker::{PromptCacheUsage, build_usage_json};
 use crate::kiro::model::events::Event;
 use crate::kiro::provider::MeteringRecorder;
 
@@ -453,6 +454,7 @@ impl SseStateManager {
         &mut self,
         input_tokens: i32,
         output_tokens: i32,
+        cache_usage: Option<&PromptCacheUsage>,
     ) -> Vec<SseEvent> {
         let mut events = Vec::new();
 
@@ -481,10 +483,7 @@ impl SseStateManager {
                         "stop_reason": self.get_stop_reason(),
                         "stop_sequence": null
                     },
-                    "usage": {
-                        "input_tokens": input_tokens,
-                        "output_tokens": output_tokens
-                    }
+                    "usage": build_usage_json(input_tokens, output_tokens, cache_usage)
                 }),
             ));
         }
@@ -539,6 +538,8 @@ pub struct StreamContext {
     strip_thinking_leading_newline: bool,
     /// 本次上游请求的凭据级 credits 记录器。
     metering_recorder: Option<MeteringRecorder>,
+    /// 模拟缓存使用量（请求带 cache_control 且凭据已确定时设置）
+    pub cache_usage: Option<PromptCacheUsage>,
 }
 
 impl StreamContext {
@@ -566,6 +567,7 @@ impl StreamContext {
             text_block_index: None,
             strip_thinking_leading_newline: false,
             metering_recorder: None,
+            cache_usage: None,
         }
     }
 
@@ -575,6 +577,7 @@ impl StreamContext {
 
     /// 生成 message_start 事件
     pub fn create_message_start_event(&self) -> serde_json::Value {
+        let usage = build_usage_json(self.input_tokens, 1, self.cache_usage.as_ref());
         json!({
             "type": "message_start",
             "message": {
@@ -585,10 +588,7 @@ impl StreamContext {
                 "model": self.model,
                 "stop_reason": null,
                 "stop_sequence": null,
-                "usage": {
-                    "input_tokens": self.input_tokens,
-                    "output_tokens": 1
-                }
+                "usage": usage
             }
         })
     }
@@ -1137,10 +1137,12 @@ impl StreamContext {
         let final_input_tokens = self.context_input_tokens.unwrap_or(self.input_tokens);
 
         // 生成最终事件
-        events.extend(
-            self.state_manager
-                .generate_final_events(final_input_tokens, self.output_tokens),
-        );
+        let cache_usage = self.cache_usage;
+        events.extend(self.state_manager.generate_final_events(
+            final_input_tokens,
+            self.output_tokens,
+            cache_usage.as_ref(),
+        ));
         events
     }
 }
@@ -1192,6 +1194,11 @@ impl BufferedStreamContext {
         self.inner.set_metering_recorder(recorder);
     }
 
+    /// 设置模拟缓存使用量（在凭据确定后调用）
+    pub fn set_cache_usage(&mut self, usage: PromptCacheUsage) {
+        self.inner.cache_usage = Some(usage);
+    }
+
     /// 处理 Kiro 事件并缓冲结果
     ///
     /// 复用 StreamContext 的事件处理逻辑，但把结果缓存而不是立即发送。
@@ -1232,12 +1239,14 @@ impl BufferedStreamContext {
             .context_input_tokens
             .unwrap_or(self.estimated_input_tokens);
 
-        // 更正 message_start 事件中的 input_tokens
+        // 更正 message_start 事件中的 usage（含模拟缓存字段）
+        let corrected_usage =
+            build_usage_json(final_input_tokens, 1, self.inner.cache_usage.as_ref());
         for event in &mut self.event_buffer {
             if event.event == "message_start" {
                 if let Some(message) = event.data.get_mut("message") {
                     if let Some(usage) = message.get_mut("usage") {
-                        usage["input_tokens"] = serde_json::json!(final_input_tokens);
+                        *usage = corrected_usage.clone();
                     }
                 }
             }

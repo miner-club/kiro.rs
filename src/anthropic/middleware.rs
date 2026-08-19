@@ -13,6 +13,7 @@ use axum::{
 use crate::common::auth;
 use crate::kiro::provider::KiroProvider;
 
+use super::cache_tracker::PromptCacheTracker;
 use super::types::ErrorResponse;
 
 /// 应用共享状态
@@ -25,6 +26,8 @@ pub struct AppState {
     pub kiro_provider: Option<Arc<KiroProvider>>,
     /// 是否开启非流式响应的 thinking 块提取
     pub extract_thinking: bool,
+    /// 模拟 prompt cache 的指纹追踪器（按凭据隔离）
+    pub cache_tracker: Arc<PromptCacheTracker>,
 }
 
 impl AppState {
@@ -34,6 +37,7 @@ impl AppState {
             api_key: api_key.into(),
             kiro_provider: None,
             extract_thinking,
+            cache_tracker: Arc::new(PromptCacheTracker::new()),
         }
     }
 
