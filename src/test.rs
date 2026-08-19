@@ -55,10 +55,10 @@ pub(crate) async fn call_stream_api() -> anyhow::Result<()> {
     println!("{}", "=".repeat(60));
 
     // 调用流式 API
-    let response = provider.call_api_stream(&request_body).await?.response;
+    let result = provider.call_api_stream(&request_body).await?;
 
     // 获取字节流
-    let mut stream = response.bytes_stream();
+    let mut stream = result.response.bytes_stream();
     let mut decoder = EventStreamDecoder::new();
 
     // 处理流式数据
